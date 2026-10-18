@@ -23,11 +23,9 @@ SYMBOLS = [
     "INJ-SWAP-USDT"
 ]
 
-# اسامی فایل‌ها برای نسخه V10 تغییر کرد تا با نسخه قبلی تداخل نکند
 HEARTBEAT_FILE = "server_messages_v10.json" 
 SIGNALS_FILE = "last_signals_v10.json" 
 MAX_HEARTBEATS = 4
-COOLDOWN_HOURS = 2 
 
 # --- ابزارهای عمومی ---
 def get_iran_time():
@@ -69,7 +67,6 @@ def save_heartbeat_ids(ids):
 
 def send_heartbeat():
     date_gregorian, date_jalali, time_str = get_iran_time()
-    # تفاوت در پیام هارت‌بیت: اضافه شدن [V10]
     msg = f"""🖥️ [V10] سرور آنلاین
 ━━━━━━━━━━━━━━━━━
 📅 تاریخ شمسی: {date_jalali}
@@ -87,37 +84,63 @@ def send_heartbeat():
             delete_telegram(old_id)
         save_heartbeat_ids(ids)
 
-# --- مدیریت سیگنال‌های تکراری ---
-def is_signal_allowed(symbol, signal_type):
+# --- مدیریت معاملات باز و بسته ---
+def load_signals():
     try:
         with open(SIGNALS_FILE, "r") as f:
-            data = json.load(f)
+            return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
-        data = {}
+        return {}
 
-    now = datetime.now()
-    last_time_str = data.get(symbol, {}).get("time")
-    
-    if last_time_str:
-        last_time = datetime.fromisoformat(last_time_str)
-        if now - last_time < timedelta(hours=COOLDOWN_HOURS):
-            return False 
-    return True
-
-def save_signal_record(symbol, signal_type):
-    try:
-        with open(SIGNALS_FILE, "r") as f:
-            data = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        data = {}
-    
-    data[symbol] = {
-        "type": signal_type,
-        "time": datetime.now().isoformat()
-    }
-    
+def save_signals(data):
     with open(SIGNALS_FILE, "w") as f:
         json.dump(data, f)
+
+def update_open_trades(exchange):
+    """بررسی می‌کند آیا معاملات باز به TP یا SL رسیده‌اند یا نه"""
+    signals = load_signals()
+    updated = False
+    
+    for symbol, data in list(signals.items()):
+        if data.get("status") == "OPEN":
+            try:
+                ticker = exchange.fetch_ticker(symbol)
+                current_price = ticker['last']
+                
+                entry = data['entry']
+                tp = data['tp']
+                sl = data['sl']
+                direction = data['direction']
+                
+                # بررسی برخورد با TP یا SL
+                if direction == "LONG":
+                    if current_price >= tp:
+                        signals[symbol]['status'] = "CLOSED"
+                        signals[symbol]['result'] = "TP"
+                        print(f"🎯 {symbol} LONG hit TP at {current_price}")
+                        updated = True
+                    elif current_price <= sl:
+                        signals[symbol]['status'] = "CLOSED"
+                        signals[symbol]['result'] = "SL"
+                        print(f"🛑 {symbol} LONG hit SL at {current_price}")
+                        updated = True
+                elif direction == "SHORT":
+                    if current_price <= tp:
+                        signals[symbol]['status'] = "CLOSED"
+                        signals[symbol]['result'] = "TP"
+                        print(f"🎯 {symbol} SHORT hit TP at {current_price}")
+                        updated = True
+                    elif current_price >= sl:
+                        signals[symbol]['status'] = "CLOSED"
+                        signals[symbol]['result'] = "SL"
+                        print(f"🛑 {symbol} SHORT hit SL at {current_price}")
+                        updated = True
+            except Exception as e:
+                print(f"⚠️ خطا در بررسی {symbol}: {e}")
+                continue
+                
+    if updated:
+        save_signals(signals)
 
 # --- داده و تحلیل ---
 def create_exchange():
@@ -207,17 +230,24 @@ if __name__ == "__main__":
     exchange = create_exchange()
     date_gregorian, date_jalali, time_str = get_iran_time()
 
+    # ۱. اول بررسی می‌کنیم که آیا معاملات باز به TP/SL رسیده‌اند
+    print("🔍 Checking open trades...")
+    update_open_trades(exchange)
+    signals_data = load_signals()
+
     for symbol in SYMBOLS:
         try:
             print(f"--- Checking {symbol} ---")
+            
+            # ۲. اگر برای این ارز معامله‌ای باز است، سیگنال جدید نده
+            if symbol in signals_data and signals_data[symbol].get("status") == "OPEN":
+                print(f"⏳ {symbol} has an OPEN trade. Skipping.")
+                continue
+
             signal, entry, sl, tp, rsi, atr = analyze(symbol, exchange)
 
             if signal is None:
                 print(f"{symbol} | Price: {entry} | RSI: {rsi:.2f} | No signal")
-                continue
-
-            if not is_signal_allowed(symbol, signal):
-                print(f"⏳ {symbol} signal {signal} skipped (Cooldown)")
                 continue
 
             if signal == "LONG":
@@ -227,7 +257,6 @@ if __name__ == "__main__":
                 rr = (entry - tp) / (sl - entry)
                 emoji = "🔴"
 
-            # تفاوت پیام سیگنال: اضافه شدن [V10]
             msg = f"""{emoji} [V10] سیگنال {signal}
 ━━━━━━━━━━━━━━━━━
 📌 نماد: {symbol}
@@ -244,8 +273,18 @@ if __name__ == "__main__":
 ━━━━━━━━━━━━━━━━━"""
 
             send_telegram(msg)
-            save_signal_record(symbol, signal) 
-            print(f"✅ {signal} signal for {symbol} sent and recorded!")
+            
+            # ۳. ذخیره سیگنال جدید به عنوان OPEN
+            signals_data[symbol] = {
+                "direction": signal,
+                "entry": entry,
+                "tp": tp,
+                "sl": sl,
+                "status": "OPEN",
+                "time": datetime.now().isoformat()
+            }
+            save_signals(signals_data)
+            print(f"✅ {signal} signal for {symbol} sent and recorded as OPEN!")
 
         except Exception as e:
             print(f"⚠️ خطا در {symbol}: {e}")
