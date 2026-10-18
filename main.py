@@ -97,9 +97,10 @@ def save_signals(data):
         json.dump(data, f)
 
 def update_open_trades(exchange):
-    """بررسی می‌کند آیا معاملات باز به TP یا SL رسیده‌اند یا نه"""
+    """بررسی می‌کند آیا معاملات باز به TP یا SL رسیده‌اند یا نه و پیام تلگرام می‌فرستد"""
     signals = load_signals()
     updated = False
+    date_gregorian, date_jalali, time_str = get_iran_time()
     
     for symbol, data in list(signals.items()):
         if data.get("status") == "OPEN":
@@ -112,29 +113,49 @@ def update_open_trades(exchange):
                 sl = data['sl']
                 direction = data['direction']
                 
+                result = None
+                
                 # بررسی برخورد با TP یا SL
                 if direction == "LONG":
                     if current_price >= tp:
-                        signals[symbol]['status'] = "CLOSED"
-                        signals[symbol]['result'] = "TP"
-                        print(f"🎯 {symbol} LONG hit TP at {current_price}")
-                        updated = True
+                        result = "TP"
                     elif current_price <= sl:
-                        signals[symbol]['status'] = "CLOSED"
-                        signals[symbol]['result'] = "SL"
-                        print(f"🛑 {symbol} LONG hit SL at {current_price}")
-                        updated = True
+                        result = "SL"
                 elif direction == "SHORT":
                     if current_price <= tp:
-                        signals[symbol]['status'] = "CLOSED"
-                        signals[symbol]['result'] = "TP"
-                        print(f"🎯 {symbol} SHORT hit TP at {current_price}")
-                        updated = True
+                        result = "TP"
                     elif current_price >= sl:
-                        signals[symbol]['status'] = "CLOSED"
-                        signals[symbol]['result'] = "SL"
-                        print(f"🛑 {symbol} SHORT hit SL at {current_price}")
-                        updated = True
+                        result = "SL"
+                
+                if result:
+                    signals[symbol]['status'] = "CLOSED"
+                    signals[symbol]['result'] = result
+                    updated = True
+                    
+                    if result == "TP":
+                        emoji = "🎯"
+                        title = "حد سود (TP) لمس شد"
+                    else:
+                        emoji = "🛑"
+                        title = "حد ضرر (SL) لمس شد"
+
+                    print(f"{emoji} {symbol} {direction} hit {result} at {current_price}")
+                    
+                    # ارسال پیام بسته شدن به تلگرام
+                    close_msg = f"""{emoji} [V10] بسته شدن معامله
+━━━━━━━━━━━━━━━━━
+📌 نماد: {symbol}
+📊 جهت: {direction}
+🏁 نتیجه: {title}
+💰 قیمت بسته شدن: {format_number(current_price)}
+🚪 قیمت ورود: {format_number(entry)}
+━━━━━━━━━━━━━━━━━
+📅 تاریخ شمسی: {date_jalali}
+📅 تاریخ میلادی: {date_gregorian}
+⏰ ساعت: {time_str}
+━━━━━━━━━━━━━━━━━"""
+                    send_telegram(close_msg)
+
             except Exception as e:
                 print(f"⚠️ خطا در بررسی {symbol}: {e}")
                 continue
