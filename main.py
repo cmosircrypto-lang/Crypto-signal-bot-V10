@@ -26,6 +26,7 @@ SYMBOLS = [
 HEARTBEAT_FILE = "server_messages_v10.json" 
 SIGNALS_FILE = "last_signals_v10.json" 
 MAX_HEARTBEATS = 4
+MAX_SIGNALS_PER_CYCLE = 3  # محدودیت جدید اعمال شد
 
 # --- ابزارهای عمومی ---
 def get_iran_time():
@@ -76,7 +77,6 @@ def send_heartbeat():
 
     ids = load_heartbeat_ids()
     new_id = send_telegram(msg)
-
     if new_id:
         ids.append(new_id)
         while len(ids) > MAX_HEARTBEATS:
@@ -84,7 +84,7 @@ def send_heartbeat():
             delete_telegram(old_id)
         save_heartbeat_ids(ids)
 
-# --- مدیریت معاملات باز و بسته ---
+# --- مدیریت معاملات ---
 def load_signals():
     try:
         with open(SIGNALS_FILE, "r") as f:
@@ -97,7 +97,6 @@ def save_signals(data):
         json.dump(data, f)
 
 def update_open_trades(exchange):
-    """بررسی می‌کند آیا معاملات باز به TP یا SL رسیده‌اند یا نه و پیام تلگرام می‌فرستد"""
     signals = load_signals()
     updated = False
     date_gregorian, date_jalali, time_str = get_iran_time()
@@ -107,41 +106,27 @@ def update_open_trades(exchange):
             try:
                 ticker = exchange.fetch_ticker(symbol)
                 current_price = ticker['last']
-                
                 entry = data['entry']
                 tp = data['tp']
                 sl = data['sl']
                 direction = data['direction']
-                
                 result = None
                 
-                # بررسی برخورد با TP یا SL
                 if direction == "LONG":
-                    if current_price >= tp:
-                        result = "TP"
-                    elif current_price <= sl:
-                        result = "SL"
+                    if current_price >= tp: result = "TP"
+                    elif current_price <= sl: result = "SL"
                 elif direction == "SHORT":
-                    if current_price <= tp:
-                        result = "TP"
-                    elif current_price >= sl:
-                        result = "SL"
+                    if current_price <= tp: result = "TP"
+                    elif current_price >= sl: result = "SL"
                 
                 if result:
                     signals[symbol]['status'] = "CLOSED"
                     signals[symbol]['result'] = result
                     updated = True
-                    
-                    if result == "TP":
-                        emoji = "🎯"
-                        title = "حد سود (TP) لمس شد"
-                    else:
-                        emoji = "🛑"
-                        title = "حد ضرر (SL) لمس شد"
-
+                    emoji = "🎯" if result == "TP" else "🛑"
+                    title = "حد سود (TP) لمس شد" if result == "TP" else "حد ضرر (SL) لمس شد"
                     print(f"{emoji} {symbol} {direction} hit {result} at {current_price}")
                     
-                    # ارسال پیام بسته شدن به تلگرام
                     close_msg = f"""{emoji} [V10] بسته شدن معامله
 ━━━━━━━━━━━━━━━━━
 📌 نماد: {symbol}
@@ -155,31 +140,23 @@ def update_open_trades(exchange):
 ⏰ ساعت: {time_str}
 ━━━━━━━━━━━━━━━━━"""
                     send_telegram(close_msg)
-
             except Exception as e:
                 print(f"⚠️ خطا در بررسی {symbol}: {e}")
                 continue
-                
-    if updated:
-        save_signals(signals)
+    if updated: save_signals(signals)
 
 # --- داده و تحلیل ---
 def create_exchange():
-    return ccxt.toobit({
-        'apiKey': TOOBIT_API_KEY,
-        'secret': TOOBIT_SECRET,
-        'enableRateLimit': True,
-    })
+    return ccxt.toobit({'apiKey': TOOBIT_API_KEY, 'secret': TOOBIT_SECRET, 'enableRateLimit': True})
 
 def fetch_ohlcv(exchange, symbol, timeframe, limit=100):
     ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    return df
+    return pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
 
 def calculate_indicators(df):
     df['ema9'] = df['close'].ewm(span=9, adjust=False).mean()
     df['ema21'] = df['close'].ewm(span=21, adjust=False).mean()
-
+    
     delta = df['close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
@@ -191,14 +168,29 @@ def calculate_indicators(df):
     low_close = (df['low'] - df['close'].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df['atr'] = tr.rolling(window=14).mean()
-
     return df
 
 def analyze(symbol, exchange):
+    # ۱. بررسی تایم 4 ساعته (کراس)
     df_4h = fetch_ohlcv(exchange, symbol, '4h', 100)
     df_4h = calculate_indicators(df_4h)
     last_4h = df_4h.iloc[-1]
+    prev_4h = df_4h.iloc[-2]
 
+    # کراس صعودی: در کندل قبلی EMA9 زیر EMA21 بوده و در کندل فعلی بالای آن رفته
+    cross_long_4h = (prev_4h['ema9'] <= prev_4h['ema21']) and (last_4h['ema9'] > last_4h['ema21'])
+    # کراس نزولی: در کندل قبلی EMA9 بالای EMA21 بوده و در کندل فعلی زیر آن رفته
+    cross_short_4h = (prev_4h['ema9'] >= prev_4h['ema21']) and (last_4h['ema9'] < last_4h['ema21'])
+
+    # ۲. بررسی تایم 1 ساعته (تایید روند)
+    df_1h = fetch_ohlcv(exchange, symbol, '1h', 100)
+    df_1h = calculate_indicators(df_1h)
+    last_1h = df_1h.iloc[-1]
+
+    trend_long_1h = last_1h['ema9'] > last_1h['ema21']
+    trend_short_1h = last_1h['ema9'] < last_1h['ema21']
+
+    # ۳. بررسی تایم 15 دقیقه (مومنتوم و نقطه ورود)
     df_15m = fetch_ohlcv(exchange, symbol, '15m', 100)
     df_15m = calculate_indicators(df_15m)
     last_15m = df_15m.iloc[-1]
@@ -207,43 +199,36 @@ def analyze(symbol, exchange):
     atr = last_15m['atr']
     rsi_15m = last_15m['rsi']
 
-    trend_long_4h = last_4h['ema9'] > last_4h['ema21']
-    trend_short_4h = last_4h['ema9'] < last_4h['ema21']
-    trend_long_15m = last_15m['ema9'] > last_15m['ema21']
-    trend_short_15m = last_15m['ema9'] < last_15m['ema21']
+    print(f"  [DEBUG 4H] Cross LONG: {cross_long_4h} | Cross SHORT: {cross_short_4h}")
+    print(f"  [DEBUG 1H] Trend LONG: {trend_long_1h} | Trend SHORT: {trend_short_1h}")
+    print(f"  [DEBUG 15m] RSI: {rsi_15m:.2f}")
 
-    print(f"  [DEBUG 4H] EMA9: {last_4h['ema9']:.4f} | EMA21: {last_4h['ema21']:.4f} | Trend: {'LONG' if trend_long_4h else 'SHORT' if trend_short_4h else 'NONE'}")
-    print(f"  [DEBUG 15m] EMA9: {last_15m['ema9']:.4f} | EMA21: {last_15m['ema21']:.4f} | RSI: {rsi_15m:.2f}")
-    
     signal = None
     sl = tp = None
 
-    if trend_long_4h:
-        if trend_long_15m and rsi_15m > 50:
-            signal = "LONG"
-            sl = entry_price - (atr * 1.5)
-            tp = entry_price + (atr * 3.0)
+    # شرط LONG
+    if cross_long_4h and trend_long_1h and rsi_15m > 50:
+        signal = "LONG"
+        sl = entry_price - (atr * 2.0)  # SL = 2x ATR
+        tp = entry_price + (atr * 4.0)  # TP = 4x ATR
 
-    elif trend_short_4h:
-        if trend_short_15m and rsi_15m < 50:
-            signal = "SHORT"
-            sl = entry_price + (atr * 1.5)
-            tp = entry_price - (atr * 3.0)
+    # شرط SHORT
+    elif cross_short_4h and trend_short_1h and rsi_15m < 50:
+        signal = "SHORT"
+        sl = entry_price + (atr * 2.0)  # SL = 2x ATR
+        tp = entry_price - (atr * 4.0)  # TP = 4x ATR
 
     return signal, entry_price, sl, tp, rsi_15m, atr
 
 def format_number(value):
-    if value >= 1000:
-        return f"{value:.2f}"
-    elif value >= 1:
-        return f"{value:.4f}"
-    else:
-        return f"{value:.6f}"
+    if value >= 1000: return f"{value:.2f}"
+    elif value >= 1: return f"{value:.4f}"
+    else: return f"{value:.6f}"
 
 # --- اجرای اصلی ---
 if __name__ == "__main__":
     print("=" * 50)
-    print("Starting V10 bot cycle...")
+    print("Starting V10 bot cycle (Cross + Confirm)...")
 
     send_heartbeat()
     print("✅ V10 Heartbeat sent.")
@@ -251,16 +236,15 @@ if __name__ == "__main__":
     exchange = create_exchange()
     date_gregorian, date_jalali, time_str = get_iran_time()
 
-    # ۱. اول بررسی می‌کنیم که آیا معاملات باز به TP/SL رسیده‌اند
-    print("🔍 Checking open trades...")
     update_open_trades(exchange)
     signals_data = load_signals()
+
+    signals_sent_this_cycle = 0
 
     for symbol in SYMBOLS:
         try:
             print(f"--- Checking {symbol} ---")
             
-            # ۲. اگر برای این ارز معامله‌ای باز است، سیگنال جدید نده
             if symbol in signals_data and signals_data[symbol].get("status") == "OPEN":
                 print(f"⏳ {symbol} has an OPEN trade. Skipping.")
                 continue
@@ -268,7 +252,11 @@ if __name__ == "__main__":
             signal, entry, sl, tp, rsi, atr = analyze(symbol, exchange)
 
             if signal is None:
-                print(f"{symbol} | Price: {entry} | RSI: {rsi:.2f} | No signal")
+                print(f"{symbol} | Price: {entry} | No valid setup.")
+                continue
+
+            if signals_sent_this_cycle >= MAX_SIGNALS_PER_CYCLE:
+                print(f"🛑 Reached max signals per cycle ({MAX_SIGNALS_PER_CYCLE}). Skipping {symbol}.")
                 continue
 
             if signal == "LONG":
@@ -295,7 +283,6 @@ if __name__ == "__main__":
 
             send_telegram(msg)
             
-            # ۳. ذخیره سیگنال جدید به عنوان OPEN
             signals_data[symbol] = {
                 "direction": signal,
                 "entry": entry,
@@ -305,7 +292,8 @@ if __name__ == "__main__":
                 "time": datetime.now().isoformat()
             }
             save_signals(signals_data)
-            print(f"✅ {signal} signal for {symbol} sent and recorded as OPEN!")
+            signals_sent_this_cycle += 1
+            print(f"✅ {signal} signal for {symbol} sent! ({signals_sent_this_cycle}/{MAX_SIGNALS_PER_CYCLE})")
 
         except Exception as e:
             print(f"⚠️ خطا در {symbol}: {e}")
