@@ -1,1 +1,1 @@
-{"BNB-SWAP-USDT": {"direction": "SHORT", "entry": 736.48, "tp": 732.355, "sl": 738.5425, "status": "OPEN", "time": "2026-10-27T08:45:45.269244"}}
+{"BNB-SWAP-USDT": {"direction": "SHORT", "entry": 736.48, "tp": 732.355, "sl": 738.5425, "status": "CLOSED", "time": "2026-10-27T08:45:45.269244", "result": "SL"}}
