@@ -171,9 +171,7 @@ def calculate_indicators(df):
     return df
 
 def get_btc_trend(exchange):
-    """روند بیت‌کوین را در تایم‌های 4 ساعته و 1 ساعته برمی‌گرداند"""
     try:
-        # تایم 4 ساعته
         df_btc_4h = fetch_ohlcv(exchange, "BTC-SWAP-USDT", '4h', 100)
         df_btc_4h = calculate_indicators(df_btc_4h)
         last_btc_4h = df_btc_4h.iloc[-1]
@@ -185,7 +183,6 @@ def get_btc_trend(exchange):
         else:
             trend_4h = "NONE"
 
-        # تایم 1 ساعته
         df_btc_1h = fetch_ohlcv(exchange, "BTC-SWAP-USDT", '1h', 100)
         df_btc_1h = calculate_indicators(df_btc_1h)
         last_btc_1h = df_btc_1h.iloc[-1]
@@ -229,26 +226,31 @@ def analyze(symbol, exchange):
     atr = last_15m['atr']
     rsi_15m = last_15m['rsi']
 
+    # ۴. فیلتر حجم (شل‌تر: ۵۰٪ میانگین)
+    avg_volume = df_15m['volume'].rolling(window=20).mean().iloc[-1]
+    current_volume = df_15m['volume'].iloc[-1]
+    volume_condition = current_volume > avg_volume * 0.5  # شرط شل‌تر
+
     print(f"  [DEBUG 4H] Cross LONG: {cross_long_4h} | Cross SHORT: {cross_short_4h}")
     print(f"  [DEBUG 1H] Trend LONG: {trend_long_1h} | Trend SHORT: {trend_short_1h}")
-    print(f"  [DEBUG 15m] RSI: {rsi_15m:.2f}")
+    print(f"  [DEBUG 15m] RSI: {rsi_15m:.2f} | Vol: {current_volume:.2f} | AvgVol: {avg_volume:.2f} | VolOK(50%): {volume_condition}")
 
     signal = None
     sl = tp = None
 
-    # شرط LONG
-    if cross_long_4h and trend_long_1h and rsi_15m > 50:
+    # شرط LONG (با فیلتر حجم شل‌تر)
+    if cross_long_4h and trend_long_1h and rsi_15m > 50 and volume_condition:
         signal = "LONG"
-        sl = entry_price - (atr * 1.5)  # SL = 1.5x ATR
-        tp = entry_price + (atr * 3.0)  # TP = 3x ATR
+        sl = entry_price - (atr * 1.5)
+        tp = entry_price + (atr * 3.0)
 
-    # شرط SHORT
-    elif cross_short_4h and trend_short_1h and rsi_15m < 50:
+    # شرط SHORT (با فیلتر حجم شل‌تر)
+    elif cross_short_4h and trend_short_1h and rsi_15m < 50 and volume_condition:
         signal = "SHORT"
-        sl = entry_price + (atr * 1.5)  # SL = 1.5x ATR
-        tp = entry_price - (atr * 3.0)  # TP = 3x ATR
+        sl = entry_price + (atr * 1.5)
+        tp = entry_price - (atr * 3.0)
 
-    return signal, entry_price, sl, tp, rsi_15m, atr
+    return signal, entry_price, sl, tp, rsi_15m, atr, volume_condition
 
 def format_number(value):
     if value >= 1000: return f"{value:.2f}"
@@ -258,7 +260,7 @@ def format_number(value):
 # --- اجرای اصلی ---
 if __name__ == "__main__":
     print("=" * 50)
-    print("Starting V10 bot cycle (Cross + Confirm + BTC Filter)...")
+    print("Starting V10 bot cycle (Cross + Confirm + BTC Filter + Soft Volume)...")
 
     send_heartbeat()
     print("✅ V10 Heartbeat sent.")
@@ -269,7 +271,6 @@ if __name__ == "__main__":
     update_open_trades(exchange)
     signals_data = load_signals()
 
-    # دریافت روند بیت‌کوین
     btc_trend_4h, btc_trend_1h = get_btc_trend(exchange)
     print(f"🌍 BTC 4H Trend: {btc_trend_4h} | BTC 1H Trend: {btc_trend_1h}")
 
@@ -283,13 +284,13 @@ if __name__ == "__main__":
                 print(f"⏳ {symbol} has an OPEN trade. Skipping.")
                 continue
 
-            signal, entry, sl, tp, rsi, atr = analyze(symbol, exchange)
+            signal, entry, sl, tp, rsi, atr, vol_ok = analyze(symbol, exchange)
 
             if signal is None:
-                print(f"{symbol} | Price: {entry} | No valid setup.")
+                print(f"{symbol} | Price: {entry} | No valid setup or low volume.")
                 continue
 
-            # فیلتر بیت‌کوین (۴ ساعته و ۱ ساعته)
+            # فیلتر بیت‌کوین
             if btc_trend_4h != "UNKNOWN" and btc_trend_4h != "NONE" and signal != btc_trend_4h:
                 print(f"🚫 {symbol} signal {signal} rejected. BTC 4H trend is {btc_trend_4h}.")
                 continue
@@ -317,6 +318,7 @@ if __name__ == "__main__":
 📊 نسبت R:R: 1:{rr:.1f}
 📈 RSI: {rsi:.2f}
 📉 ATR: {format_number(atr)}
+📊 Volume: {current_volume:.2f} (Avg: {avg_volume:.2f})
 ━━━━━━━━━━━━━━━━━
 📅 تاریخ شمسی: {date_jalali}
 📅 تاریخ میلادی: {date_gregorian}
